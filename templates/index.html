@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Stream Detection</title>
+    <style>
+        .container {
+            max-width: 1200px;
+            margin: 20px auto;
+            text-align: center;
+            padding: 0 20px;
+        }
+        .frame-container {
+            margin: 20px auto;
+            max-width: 90vw;  /* 90% of viewport width */
+            height: auto;
+            position: relative;
+            aspect-ratio: 16/9;  /* Maintain aspect ratio */
+            overflow: hidden;
+        }
+        img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;  /* Maintain aspect ratio */
+            border: 1px solid #ddd;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        .controls {
+            margin: 20px 0;
+        }
+        .btn {
+            padding: 10px 20px;
+            margin: 0 10px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+        .btn:hover {
+            background-color: #45a049;
+        }
+        .btn.stop {
+            background-color: #f44336;
+        }
+        .btn.stop:hover {
+            background-color: #da190b;
+        }
+        #status {
+            margin-top: 10px;
+            font-weight: bold;
+        }
+        .stream-buttons {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 10px;
+            margin: 20px 0;
+        }
+        .stream-name {
+            font-size: 14px;
+            margin-top: 5px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Live Stream Detection</h1>
+        <div id="streamButtons" class="stream-buttons">
+            <!-- Buttons will be inserted here -->
+        </div>
+        <div class="frame-container">
+            <img id="liveFrame" src="/static/home-placeholder-image.png" alt="Live Detection">
+        </div>
+        <div class="controls">
+            <button class="btn stop" onclick="stopStream()">Stop All Streams</button>
+        </div>
+        <div id="status">Not Connected</div>
+        <div id="currentStream" class="stream-name"></div>
+    </div>
+
+    <script>
+        const PLACEHOLDER_IMAGE = '/static/home-placeholder-image.png';
+        let currentStream = null;
+        let streams = [];
+        let ws = null;  // Add WebSocket variable
+
+        // Add WebSocket URL setup
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        console.log('WebSocket URL:', wsUrl);
+
+        // Load available streams
+        async function loadStreams() {
+            try {
+                const response = await fetch('/streams');
+                const data = await response.json();
+                streams = data.live_streams;
+                createStreamButtons();
+            } catch (error) {
+                console.error('Error loading streams:', error);
+            }
+        }
+
+        function createStreamButtons() {
+            const container = document.getElementById('streamButtons');
+            streams.forEach(stream => {
+                const button = document.createElement('button');
+                button.className = 'btn';
+                button.onclick = () => startStream(stream.url, stream.name);
+                button.textContent = stream.name;
+                container.appendChild(button);
+            });
+        }
+
+        async function startStream(url, name) {
+            try {
+                // Stop any existing stream first
+                if (currentStream) {
+                    document.getElementById('status').textContent = 'Stopping previous stream...';
+                    await stopStream();
+                }
+
+                document.getElementById('status').textContent = 'Starting stream...';
+                const response = await fetch('/start', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url: url })
+                });
+                
+                const result = await response.json();
+                if (response.ok) {
+                    currentStream = url;
+                    document.getElementById('currentStream').textContent = `Current: ${name}`;
+                    console.log('Stream started, connecting WebSocket...');
+                    connectWebSocket();  // Connect after successful stream start
+                } else {
+                    document.getElementById('status').textContent = 'Error: ' + result.error;
+                }
+            } catch (error) {
+                console.error('Start stream error:', error);
+                document.getElementById('status').textContent = 'Error: ' + error;
+            }
+        }
+
+        async function stopStream() {
+            if (!currentStream) return;
+            
+            try {
+                const response = await fetch('/stop', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url: currentStream })
+                });
+                
+                const result = await response.json();
+                if (response.ok) {
+                    currentStream = null;
+                    document.getElementById('status').textContent = 'Stream stopped';
+                    document.getElementById('currentStream').textContent = '';
+                    document.getElementById('liveFrame').src = PLACEHOLDER_IMAGE;
+                    if (ws) ws.close();
+                } else {
+                    document.getElementById('status').textContent = 'Error: ' + result.error;
+                }
+            } catch (error) {
+                document.getElementById('status').textContent = 'Error: ' + error;
+            }
+        }
+
+        function connectWebSocket() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            
+            console.log('Connecting to WebSocket...');
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = function() {
+                console.log('WebSocket Connected');
+                document.getElementById('status').textContent = 'Connected to stream';
+            };
+
+            ws.onmessage = function(event) {
+                console.log('Received frame');
+                const img = document.getElementById('liveFrame');
+                img.src = 'data:image/jpeg;base64,' + event.data;
+            };
+
+            ws.onclose = function() {
+                console.log('WebSocket Disconnected');
+                document.getElementById('status').textContent = 'Disconnected';
+                // Try to reconnect if stream is still active
+                if (currentStream) {
+                    console.log('Attempting to reconnect...');
+                    setTimeout(connectWebSocket, 1000);
+                }
+            };
+
+            ws.onerror = function(error) {
+                console.error('WebSocket Error:', error);
+                document.getElementById('status').textContent = 'Error: ' + error;
+            };
+        }
+
+        // Load streams when page loads
+        loadStreams();
+    </script>
+</body>
+</html>

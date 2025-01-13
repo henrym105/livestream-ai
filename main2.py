@@ -1,4 +1,9 @@
-from flask import Flask, request, jsonify
+from fastapi import FastAPI, WebSocket, Request, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles  # Add back static files
+import base64
+import asyncio
 import cv2
 import yt_dlp
 import threading
@@ -7,9 +12,12 @@ from ultralytics import YOLO
 import time
 import numpy as np
 import torch  # Add this import
+import json
 
-# Initialize Flask app
-app = Flask(__name__)
+# Initialize FastAPI app
+app = FastAPI()
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 # Global configuration
 FRAME_DIR = "frames"
@@ -78,6 +86,48 @@ def draw_detections(frame, results, conf_threshold=0.01):
         )
     return frame
 
+# Add WebSocket manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        print(f"New client connected. Total connections: {len(self.active_connections)}")
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+        print(f"Client disconnected. Total connections: {len(self.active_connections)}")
+
+    async def broadcast_frame(self, frame):
+        if not self.active_connections:
+            return
+            
+        try:
+            # Compress frame for faster transmission
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+            _, buffer = cv2.imencode('.jpg', frame, encode_param)
+            frame_bytes = base64.b64encode(buffer).decode('utf-8')
+            
+            # Broadcast to all connected clients
+            disconnect_list = []
+            for connection in self.active_connections:
+                try:
+                    await connection.send_text(frame_bytes)
+                except Exception as e:
+                    print(f"Error sending frame: {e}")
+                    disconnect_list.append(connection)
+            
+            # Clean up disconnected clients
+            for connection in disconnect_list:
+                self.disconnect(connection)
+                
+        except Exception as e:
+            print(f"Error broadcasting frame: {e}")
+
+manager = ConnectionManager()
+
 # Function to fetch video stream
 class YouTubeStream:
     def __init__(self, url, frame_rate=2):
@@ -88,6 +138,8 @@ class YouTubeStream:
         self.frame_rate = frame_rate
         self.frames = []
         self.conf_threshold = 0.01  # Add confidence threshold
+        self.latest_frame_path = os.path.join(FRAME_DIR, 'latest_frame.jpg')
+        self.manager = manager
 
     def initialize_stream(self):
         try:
@@ -110,46 +162,40 @@ class YouTubeStream:
             print(f"Failed to initialize stream: {e}")
             raise
 
-    def start_stream(self):
+    async def start_stream(self):
         self.running = True
         frame_count = 0
         process_interval = 1.0 / self.frame_rate
 
+        print(f"Starting stream with {self.frame_rate} FPS")
         while self.running and self.capture.isOpened():
             start_time = time.time()
             
             ret, frame = self.capture.read()
             if not ret:
+                print("Failed to read frame")
                 break
 
-            frame_id = (frame_count % 1) + 1
-            
-            # Detect all objects
-            # results = model(frame.to(device))[0]
+            # Process frame and detect objects
             results = model(frame)[0]
             detections = results.boxes
             detection_count = len([box for box in detections if float(box.conf[0]) > self.conf_threshold])
 
             if detection_count > 0:
                 frame = draw_detections(frame, results, self.conf_threshold)
-                print(f"Frame {frame_id}: {detection_count} objects detected")
+                print(f"Frame {frame_count}: {detection_count} objects detected")
 
-            # Save and display frame handling
-            frame_path = os.path.join(FRAME_DIR, f"frame_{frame_id}.jpg")
-            cv2.imwrite(frame_path, frame)
-            if frame_path not in self.frames:
-                self.frames.append(frame_path)
-
-            if len(self.frames) > 3:
-                oldest_frame = self.frames.pop(0)
-                os.remove(oldest_frame)
+            # Broadcast frame to all connected clients
+            await self.manager.broadcast_frame(frame)
 
             # Frame rate control
             processing_time = time.time() - start_time
             sleep_time = max(0, process_interval - processing_time)
-            time.sleep(sleep_time)
+            await asyncio.sleep(sleep_time)
             
             frame_count += 1
+
+        print("Stream ended")
 
     def stop_stream(self):
         self.running = False
@@ -159,57 +205,79 @@ class YouTubeStream:
 # Controller for YouTube stream handling
 streams = {}
 
-@app.route("/start", methods=["POST"])
-def start_stream():
-    """
-    Start a livestream from a YouTube URL. 
-    Payload format: {"url": "<YouTube livestream URL>"}
-    """
-    data = request.json
+# Routes
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+@app.post("/start")
+async def start_stream(request: Request):
+    data = await request.json()
     url = data.get("url")
     if not url:
-        return jsonify({"error": "URL is required"}), 400
+        return {"error": "URL is required"}
 
-    if url in streams:
-        return jsonify({"error": "Stream already running"}), 400
+    # Stop all existing streams
+    for stream_url, stream in list(streams.items()):
+        stream.stop_stream()
+        streams.pop(stream_url)
+        print(f"Stopped stream: {stream_url}")
 
     yt_stream = YouTubeStream(url, frame_rate=2)
     try:
         yt_stream.initialize_stream()
     except Exception as e:
-        return jsonify({"error": f"Failed to initialize stream: {e}"}), 500
+        return {"error": f"Failed to initialize stream: {e}"}
 
-    thread = threading.Thread(target=yt_stream.start_stream)
-    thread.start()
+    asyncio.create_task(yt_stream.start_stream())
     streams[url] = yt_stream
 
-    return jsonify({"message": "Stream started successfully"}), 200
+    return {"message": "Stream started successfully"}
 
-@app.route("/stop", methods=["POST"])
-def stop_stream():
+@app.post("/stop")
+async def stop_stream(request: Request):
     """
     Stop a livestream. 
     Payload format: {"url": "<YouTube livestream URL>"}
     """
-    data = request.json
+    data = await request.json()
     url = data.get("url")
     if not url:
-        return jsonify({"error": "URL is required"}), 400
+        return {"error": "URL is required"}, 400
 
     yt_stream = streams.pop(url, None)
     if not yt_stream:
-        return jsonify({"error": "Stream not found"}), 404
+        return {"error": "Stream not found"}, 404
 
     yt_stream.stop_stream()
-    return jsonify({"message": "Stream stopped successfully"}), 200
+    return {"message": "Stream stopped successfully"}
 
-@app.route("/frames", methods=["GET"])
-def list_frames():
+@app.get("/frames")
+async def list_frames():
     """
     List all frames saved from the livestream.
     """
     frames = [f for f in os.listdir(FRAME_DIR) if f.endswith(".jpg")]
-    return jsonify({"frames": frames}), 200
+    return {"frames": frames}
+
+@app.get("/streams")
+async def get_streams():
+    """Get available livestream URLs."""
+    try:
+        with open("static/live-cam-urls.json") as f:
+            return json.load(f)
+    except Exception as e:
+        return {"error": str(e)}
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

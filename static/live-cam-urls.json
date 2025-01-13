@@ -1,0 +1,20 @@
+{
+    "live_streams": [
+        {
+            "name": "Steamboat - Steamboat Square",
+            "url": "https://www.youtube.com/watch?v=2UJDLWcSADk"
+        },
+        {
+            "name": "Steamboat - Four Points",
+            "url": "https://www.youtube.com/watch?v=Zf21nwFUyUs"
+        },
+        {
+            "name": "Steamboat - Christie Peak Express & Wild Blue Gondola",
+            "url": "https://www.youtube.com/watch?v=fI30YzAmCHw"
+        },
+        {
+            "name": "Steamboat - Steamboat Gondola",
+            "url": "https://www.youtube.com/watch?v=oKKj_upaoCI"
+        }
+    ]
+}
