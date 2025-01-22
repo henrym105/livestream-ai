@@ -24,7 +24,7 @@ FRAME_DIR = "frames"
 os.makedirs(FRAME_DIR, exist_ok=True)  # Ensure frame storage directory exists
 
 # Configure device
-device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+device = torch.device('mps' if torch.mps.is_available() else 'cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
 # Load YOLOv8n model

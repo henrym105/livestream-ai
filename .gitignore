@@ -1,6 +1,8 @@
 yolo*.pt
 venv/
-frames/*
+frames/
+finetuning/frames/*.jpg
+finetuning/labeled/
 
 # Standard ignores
 __pycache__/
